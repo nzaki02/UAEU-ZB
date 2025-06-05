@@ -37,7 +37,9 @@ def initialize_app():
     if 'analysis_results' not in st.session_state:
         st.session_state.analysis_results = []
     if 'claude_enabled' not in st.session_state:
-        st.session_state.claude_enabled = True
+        st.session_state.claude_enabled = False
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = ""
 
 def load_custom_css():
     """Load custom CSS for enhanced styling"""
@@ -90,33 +92,86 @@ def load_custom_css():
             text-align: center;
             margin: 0.5rem 0;
         }
+        .api-key-section {
+            background: #f8f9fa;
+            padding: 1.5rem;
+            border-radius: 10px;
+            border: 2px solid #e9ecef;
+            margin: 1rem 0;
+        }
+        .api-status-connected {
+            background: #d4edda;
+            color: #155724;
+            padding: 0.75rem;
+            border-radius: 5px;
+            border: 1px solid #c3e6cb;
+        }
+        .api-status-disconnected {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 0.75rem;
+            border-radius: 5px;
+            border: 1px solid #f5c6cb;
+        }
     </style>
     """, unsafe_allow_html=True)
 
 # ==================== CLAUDE API INTEGRATION ====================
 
 class ClaudeAPIManager:
-    """Manage Claude API interactions and error handling"""
+    """Manage Claude API interactions with user-provided API key"""
     
-    def __init__(self):
-        self.api_key = self._get_api_key()
-        self.client = self._initialize_client()
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or self._get_api_key()
+        self.client = self._initialize_client() if self.api_key else None
     
     def _get_api_key(self) -> str:
-        """Get API key from environment variables"""
+        """Get API key from session state or environment variables"""
+        # First check session state (user input)
+        if st.session_state.get('api_key'):
+            return st.session_state.api_key
+        
+        # Fallback to environment variable
         api_key = os.getenv('ANTHROPIC_API_KEY')
-        if not api_key:
-            st.error("❌ ANTHROPIC_API_KEY not found in .env file!")
-            st.info("💡 Create a .env file with: ANTHROPIC_API_KEY=your_api_key_here")
-            st.stop()
-        return api_key
+        return api_key or ""
     
     def _initialize_client(self) -> anthropic.Anthropic:
         """Initialize Anthropic client"""
-        return anthropic.Anthropic(api_key=self.api_key)
+        if not self.api_key:
+            return None
+        
+        try:
+            return anthropic.Anthropic(api_key=self.api_key)
+        except Exception as e:
+            st.error(f"Failed to initialize Claude client: {str(e)}")
+            return None
+    
+    def is_connected(self) -> bool:
+        """Check if API connection is valid"""
+        return self.client is not None and bool(self.api_key)
+    
+    def test_connection(self) -> bool:
+        """Test the API connection"""
+        if not self.client:
+            return False
+        
+        try:
+            # Make a small test request
+            response = self.client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=10,
+                messages=[{"role": "user", "content": "Hello"}]
+            )
+            return True
+        except Exception as e:
+            st.error(f"API connection test failed: {str(e)}")
+            return False
     
     def make_api_call(self, prompt: str, max_tokens: int = 4000) -> str:
         """Make API call to Claude with error handling"""
+        if not self.client:
+            raise Exception("Claude API client not initialized. Please provide a valid API key.")
+        
         try:
             response = self.client.messages.create(
                 model="claude-3-5-sonnet-20241022",
@@ -145,6 +200,9 @@ class ProcessAnalyzer:
     
     def extract_process_steps(self, content: str, filename: str) -> Dict:
         """Extract and analyze process steps from document content"""
+        if not self.api_manager.is_connected():
+            raise Exception("Claude API not connected. Please provide a valid API key.")
+        
         prompt = self._build_extraction_prompt(content, filename)
         
         try:
@@ -232,6 +290,9 @@ class OptimizationEngine:
     
     def generate_optimizations(self, process_data: Dict) -> Dict:
         """Generate intelligent optimization recommendations"""
+        if not self.api_manager.is_connected():
+            raise Exception("Claude API not connected. Please provide a valid API key.")
+        
         prompt = self._build_optimization_prompt(process_data)
         
         try:
@@ -342,6 +403,9 @@ class ImplementationPlanner:
     
     def generate_implementation_plan(self, optimization_data: Dict) -> str:
         """Generate detailed implementation plan"""
+        if not self.api_manager.is_connected():
+            return "Implementation plan generation requires Claude API connection."
+        
         prompt = self._build_implementation_prompt(optimization_data)
         
         try:
@@ -373,6 +437,129 @@ class ImplementationPlanner:
         Format as a professional document suitable for executive presentation.
         Include specific timelines, costs, and measurable outcomes.
         """
+
+# ==================== API KEY MANAGEMENT UI ====================
+
+class APIKeyManager:
+    """Manage API key input and validation in the UI"""
+    
+    @staticmethod
+    def render_api_key_section():
+        """Render API key input section"""
+        st.markdown("""
+        <div class="api-key-section">
+            <h3>🔑 Claude API Configuration</h3>
+            <p>Enter your Anthropic Claude API key to enable AI-powered analysis</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            # API key input
+            api_key_input = st.text_input(
+                "Anthropic API Key",
+                type="password",
+                placeholder="sk-ant-api03-...",
+                help="Get your API key from https://console.anthropic.com/",
+                key="api_key_input"
+            )
+            
+            # Update session state when input changes
+            if api_key_input != st.session_state.get('api_key', ''):
+                st.session_state.api_key = api_key_input
+                st.session_state.claude_enabled = False  # Reset connection status
+        
+        with col2:
+            # Test connection button
+            if st.button("🔍 Test Connection", type="secondary"):
+                APIKeyManager._test_api_connection()
+        
+        # Display connection status
+        APIKeyManager._display_connection_status()
+        
+        # Show helpful information
+        APIKeyManager._display_api_key_help()
+        
+        return bool(st.session_state.get('api_key', ''))
+    
+    @staticmethod
+    def _test_api_connection():
+        """Test the API connection"""
+        if not st.session_state.get('api_key'):
+            st.error("❌ Please enter your API key first")
+            return
+        
+        with st.spinner("Testing API connection..."):
+            try:
+                api_manager = ClaudeAPIManager(st.session_state.api_key)
+                if api_manager.test_connection():
+                    st.session_state.claude_enabled = True
+                    st.success("✅ API connection successful!")
+                else:
+                    st.session_state.claude_enabled = False
+                    st.error("❌ API connection failed")
+            except Exception as e:
+                st.session_state.claude_enabled = False
+                st.error(f"❌ API connection error: {str(e)}")
+    
+    @staticmethod
+    def _display_connection_status():
+        """Display current connection status"""
+        if st.session_state.get('claude_enabled'):
+            st.markdown("""
+            <div class="api-status-connected">
+                ✅ <strong>Connected to Claude Sonnet 4</strong><br>
+                AI-powered analysis is enabled
+            </div>
+            """, unsafe_allow_html=True)
+        elif st.session_state.get('api_key'):
+            st.markdown("""
+            <div class="api-status-disconnected">
+                ⚠️ <strong>API Key Provided - Connection Not Tested</strong><br>
+                Click "Test Connection" to verify your API key
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="api-status-disconnected">
+                ❌ <strong>No API Key Provided</strong><br>
+                Please enter your Anthropic API key above
+            </div>
+            """, unsafe_allow_html=True)
+    
+    @staticmethod
+    def _display_api_key_help():
+        """Display helpful information about API keys"""
+        with st.expander("ℹ️ How to get your Claude API key", expanded=False):
+            st.markdown("""
+            **Step 1: Create an Anthropic Account**
+            - Visit [console.anthropic.com](https://console.anthropic.com/)
+            - Sign up or log in to your account
+            
+            **Step 2: Generate API Key**
+            - Navigate to the "API Keys" section
+            - Click "Create Key"
+            - Copy your API key (starts with `sk-ant-api03-`)
+            
+            **Step 3: Add Credits**
+            - Go to "Billing" section
+            - Add credits to your account (minimum $5 recommended)
+            
+            **Step 4: Use the Key**
+            - Paste your API key in the field above
+            - Click "Test Connection" to verify
+            
+            **Security Note:**
+            - Your API key is stored only in your browser session
+            - It's not saved to any file or server
+            - You'll need to re-enter it each time you refresh the page
+            
+            **Pricing:**
+            - Claude 3.5 Sonnet: ~$3 per million input tokens
+            - Each process analysis uses approximately 1,000-5,000 tokens
+            - Cost per analysis: $0.003 - $0.015
+            """)
 
 # ==================== DOCUMENT PROCESSING ====================
 
@@ -435,15 +622,23 @@ class DocumentExtractor:
 class ProcessOptimizer:
     """Main process optimization orchestrator"""
     
-    def __init__(self):
-        self.api_manager = ClaudeAPIManager()
-        self.analyzer = ProcessAnalyzer(self.api_manager)
-        self.optimizer = OptimizationEngine(self.api_manager)
-        self.planner = ImplementationPlanner(self.api_manager)
+    def __init__(self, api_key: str = None):
+        self.api_manager = ClaudeAPIManager(api_key)
+        if self.api_manager.is_connected():
+            self.analyzer = ProcessAnalyzer(self.api_manager)
+            self.optimizer = OptimizationEngine(self.api_manager)
+            self.planner = ImplementationPlanner(self.api_manager)
         self.doc_extractor = DocumentExtractor()
+    
+    def is_ready(self) -> bool:
+        """Check if the optimizer is ready for analysis"""
+        return self.api_manager.is_connected()
     
     def analyze_document(self, file) -> Dict:
         """Analyze uploaded document using Claude"""
+        if not self.is_ready():
+            raise Exception("ProcessOptimizer not ready. Please provide a valid API key.")
+        
         content = self._extract_and_validate_content(file)
         
         # Use Claude for intelligent analysis
@@ -469,14 +664,6 @@ class ProcessOptimizer:
             content = f"Process document: {file.name}\nContent extraction was limited."
         
         return content
-    
-    def generate_comprehensive_report(self, analysis_results: List[Dict]) -> Dict:
-        """Generate portfolio-level analysis report"""
-        return {
-            "portfolio_metrics": PortfolioAnalyzer.calculate_portfolio_metrics(analysis_results),
-            "summary": f"Portfolio analysis of {len(analysis_results)} processes",
-            "generated_at": datetime.now().isoformat()
-        }
 
 # ==================== PORTFOLIO ANALYSIS ====================
 
@@ -688,7 +875,6 @@ The recommended approach balances ambitious optimization goals with practical im
 class SVGGenerator:
     """Generate SVG workflow diagrams"""
     
-    
     @staticmethod
     def generate_advanced_svg_workflow(analysis_result: Dict) -> str:
         """Generate enhanced SVG workflow with optimization insights"""
@@ -702,150 +888,130 @@ class SVGGenerator:
         eliminated_steps = optimization_data.get('eliminated_steps', [])
         
         return f'''<?xml version="1.0" encoding="UTF-8"?>
-    <svg width="1400" height="1200" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-        <style>
-        .title-font {{ font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif; }}
-        .body-font {{ font-family: 'Inter', 'Segoe UI', 'system-ui', sans-serif; }}
-        .metric-font {{ font-family: 'SF Pro Display', 'Segoe UI', 'Roboto', sans-serif; }}
-        </style>
-        
-        <linearGradient id="headerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
-        <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
-        </linearGradient>
-        
-        <linearGradient id="successGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" style="stop-color:#56ab2f;stop-opacity:1" />
-        <stop offset="100%" style="stop-color:#a8e6cf;stop-opacity:1" />
-        </linearGradient>
-        
-        <linearGradient id="eliminatedGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" style="stop-color:#e74c3c;stop-opacity:1" />
-        <stop offset="100%" style="stop-color:#c0392b;stop-opacity:1" />
-        </linearGradient>
-        
-        <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-        <feDropShadow dx="3" dy="6" stdDeviation="4" flood-color="#000" flood-opacity="0.2"/>
-        </filter>
-        
-        <filter id="glow">
-        <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-        <feMerge> 
-            <feMergeNode in="coloredBlur"/>
-            <feMergeNode in="SourceGraphic"/>
-        </feMerge>
-        </filter>
-    </defs>
+<svg width="1400" height="1200" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+    .title-font {{ font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif; }}
+    .body-font {{ font-family: 'Inter', 'Segoe UI', 'system-ui', sans-serif; }}
+    .metric-font {{ font-family: 'SF Pro Display', 'Segoe UI', 'Roboto', sans-serif; }}
+    </style>
     
-    <!-- Background -->
-    <rect width="1400" height="1200" fill="#f8fafc"/>
+    <linearGradient id="headerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+    <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+    <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+    </linearGradient>
     
-    <!-- Header -->
-    <rect x="0" y="0" width="1400" height="120" fill="url(#headerGradient)" filter="url(#shadow)"/>
-    <text x="700" y="45" text-anchor="middle" fill="white" font-size="32" class="title-font" font-weight="300" letter-spacing="1px">{process_data['process_name']} - AI-Optimized Workflow</text>
-    <text x="700" y="75" text-anchor="middle" fill="white" font-size="16" class="body-font" font-weight="400" opacity="0.9">Powered by Claude Sonnet 4 | {opt_summary.get('time_saved_percentage', 0):.1f}% Time Reduction | AED {opt_summary.get('estimated_annual_savings', 0):,.0f} Annual Savings</text>
-    <text x="700" y="100" text-anchor="middle" fill="white" font-size="14" class="body-font" font-weight="300" opacity="0.8">🚀 Implementation ROI: {((opt_summary.get('estimated_annual_savings', 0) * 3 - opt_summary.get('estimated_implementation_cost', 0)) / max(opt_summary.get('estimated_implementation_cost', 1), 1) * 100):.1f}% over 3 years</text>
+    <linearGradient id="successGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+    <stop offset="0%" style="stop-color:#56ab2f;stop-opacity:1" />
+    <stop offset="100%" style="stop-color:#a8e6cf;stop-opacity:1" />
+    </linearGradient>
     
-    <!-- Metrics Dashboard -->
-    <rect x="50" y="150" width="1300" height="80" fill="white" stroke="#e2e8f0" stroke-width="1" rx="16" filter="url(#shadow)"/>
+    <linearGradient id="eliminatedGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+    <stop offset="0%" style="stop-color:#e74c3c;stop-opacity:1" />
+    <stop offset="100%" style="stop-color:#c0392b;stop-opacity:1" />
+    </linearGradient>
     
-    <!-- Metric Cards -->
-    <g transform="translate(100, 170)">
-        <rect width="220" height="40" fill="url(#successGradient)" rx="20" filter="url(#glow)"/>
-        <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">Steps: {len(current_steps)} → {len(optimized_steps)}</text>
-        <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">({len(eliminated_steps)} eliminated)</text>
-    </g>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+    <feDropShadow dx="3" dy="6" stdDeviation="4" flood-color="#000" flood-opacity="0.2"/>
+    </filter>
     
-    <g transform="translate(350, 170)">
-        <rect width="220" height="40" fill="#4a90e2" rx="20" filter="url(#glow)"/>
-        <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">Time: {opt_summary.get('total_time_before', 0):.0f}h → {opt_summary.get('total_time_after', 0):.0f}h</text>
-        <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">({opt_summary.get('time_saved_percentage', 0):.1f}% faster)</text>
-    </g>
-    
-    <g transform="translate(600, 170)">
-        <rect width="220" height="40" fill="#f59e0b" rx="20" filter="url(#glow)"/>
-        <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">Savings: AED {opt_summary.get('estimated_annual_savings', 0)/1000:.0f}K</text>
-        <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">Annual Value</text>
-    </g>
-    
-    <g transform="translate(850, 170)">
-        <rect width="220" height="40" fill="#ef4444" rx="20" filter="url(#glow)"/>
-        <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">Payback: {opt_summary.get('payback_months', 0):.1f} months</text>
-        <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">Break-even point</text>
-    </g>
-    
-    <g transform="translate(1100, 170)">
-        <rect width="220" height="40" fill="#8b5cf6" rx="20" filter="url(#glow)"/>
-        <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">AI Ops: {opt_summary.get('automation_opportunities', 0)}</text>
-        <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">Automation Opportunities</text>
-    </g>
-    
-    <!-- Process Comparison Section -->
-    <text x="700" y="280" text-anchor="middle" fill="#1e293b" font-size="22" class="title-font" font-weight="500" letter-spacing="0.5px">🔄 AI-Powered Process Transformation</text>
-    
-    <!-- Before Process -->
-    <rect x="70" y="300" width="600" height="450" fill="#fef2f2" stroke="#ef4444" stroke-width="2" rx="20" filter="url(#shadow)"/>
-    <rect x="80" y="310" width="580" height="40" fill="#dc2626" rx="12"/>
-    <text x="90" y="335" fill="white" font-size="16" class="title-font" font-weight="500">❌ BEFORE: Current Process ({len(current_steps)} steps - {opt_summary.get('total_time_before', 0):.0f}h)</text>
-    
-    <!-- Current Process Steps -->
-    {SVGGenerator._generate_current_steps_svg(current_steps, eliminated_steps, 90, 365)}
-    
-    <!-- After Process -->
-    <rect x="730" y="300" width="600" height="450" fill="#f0fdf4" stroke="#22c55e" stroke-width="2" rx="20" filter="url(#shadow)"/>
-    <rect x="740" y="310" width="580" height="40" fill="#16a34a" rx="12"/>
-    <text x="750" y="335" fill="white" font-size="16" class="title-font" font-weight="500">✅ AFTER: Optimized Process ({len(optimized_steps)} steps - {opt_summary.get('total_time_after', 0):.0f}h)</text>
-    
-    <!-- Optimized Process Steps -->
-    {SVGGenerator._generate_optimized_steps_svg(optimized_steps, 750, 365)}
-    
-    <!-- Transformation Arrow -->
-    <g transform="translate(670, 525)">
-        <circle cx="0" cy="0" r="30" fill="#f59e0b" filter="url(#shadow)"/>
-        <text x="0" y="8" text-anchor="middle" fill="white" font-size="24" class="title-font" font-weight="300">→</text>
-    </g>
-    
-    <!-- Benefits Summary -->
-    <rect x="70" y="800" width="1260" height="100" fill="white" stroke="#e2e8f0" stroke-width="1" rx="16" filter="url(#shadow)"/>
-    <text x="700" y="830" text-anchor="middle" fill="#1e293b" font-size="20" class="title-font" font-weight="500" letter-spacing="0.5px">💎 Key Benefits</text>
-    
-    <!-- Benefit items -->
-    <text x="90" y="860" fill="#475569" font-size="14" class="body-font" font-weight="400">• {opt_summary.get('time_saved_percentage', 0):.1f}% faster processing</text>
-    <text x="90" y="880" fill="#475569" font-size="14" class="body-font" font-weight="400">• AED {opt_summary.get('estimated_annual_savings', 0):,.0f} annual savings</text>
-    
-    <text x="450" y="860" fill="#475569" font-size="14" class="body-font" font-weight="400">• {len(eliminated_steps)} steps eliminated</text>
-    <text x="450" y="880" fill="#475569" font-size="14" class="body-font" font-weight="400">• {opt_summary.get('automation_opportunities', 0)} automation opportunities</text>
-    
-    <text x="800" y="860" fill="#475569" font-size="14" class="body-font" font-weight="400">• ROI payback in {opt_summary.get('payback_months', 0):.1f} months</text>
-    <text x="800" y="880" fill="#475569" font-size="14" class="body-font" font-weight="400">• Reduced errors and improved quality</text>
-    
-    <!-- Implementation Timeline -->
-    <rect x="70" y="930" width="1260" height="80" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" rx="16"/>
-    <text x="700" y="955" text-anchor="middle" fill="#1e293b" font-size="18" class="title-font" font-weight="500" letter-spacing="0.5px">📅 Implementation Timeline</text>
-    
-    <!-- Timeline phases -->
-    <rect x="100" y="965" width="200" height="28" fill="#3b82f6" rx="14" filter="url(#glow)"/>
-    <text x="200" y="982" text-anchor="middle" fill="white" font-size="12" class="body-font" font-weight="500">Phase 1: Planning (Month 1)</text>
-    
-    <rect x="320" y="965" width="200" height="28" fill="#f59e0b" rx="14" filter="url(#glow)"/>
-    <text x="420" y="982" text-anchor="middle" fill="white" font-size="12" class="body-font" font-weight="500">Phase 2: Implementation (Months 2-3)</text>
-    
-    <rect x="540" y="965" width="200" height="28" fill="#10b981" rx="14" filter="url(#glow)"/>
-    <text x="640" y="982" text-anchor="middle" fill="white" font-size="12" class="body-font" font-weight="500">Phase 3: Training (Month 4)</text>
-    
-    <rect x="760" y="965" width="200" height="28" fill="#8b5cf6" rx="14" filter="url(#glow)"/>
-    <text x="860" y="982" text-anchor="middle" fill="white" font-size="12" class="body-font" font-weight="500">Phase 4: Go-Live (Month 5)</text>
-    
-    <rect x="980" y="965" width="200" height="28" fill="#f97316" rx="14" filter="url(#glow)"/>
-    <text x="1080" y="982" text-anchor="middle" fill="white" font-size="12" class="body-font" font-weight="500">Phase 5: Optimization (Month 6)</text>
-    
-    <!-- Footer -->
-    <rect x="0" y="1040" width="1400" height="60" fill="#1e293b"/>
-    <text x="700" y="1065" text-anchor="middle" fill="white" font-size="16" class="title-font" font-weight="400" letter-spacing="0.5px">AI Business Process Optimizer - Powered by Claude Sonnet 4</text>
-    <text x="700" y="1085" text-anchor="middle" fill="white" font-size="12" class="body-font" font-weight="300" opacity="0.8">Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Transform your business processes with AI</text>
-    
-    </svg>'''
+    <filter id="glow">
+    <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+    <feMerge> 
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+    </feMerge>
+    </filter>
+</defs>
+
+<!-- Background -->
+<rect width="1400" height="1200" fill="#f8fafc"/>
+
+<!-- Header -->
+<rect x="0" y="0" width="1400" height="120" fill="url(#headerGradient)" filter="url(#shadow)"/>
+<text x="700" y="45" text-anchor="middle" fill="white" font-size="32" class="title-font" font-weight="300" letter-spacing="1px">{process_data['process_name']} - AI-Optimized Workflow</text>
+<text x="700" y="75" text-anchor="middle" fill="white" font-size="16" class="body-font" font-weight="400" opacity="0.9">Powered by Claude Sonnet 4 | {opt_summary.get('time_saved_percentage', 0):.1f}% Time Reduction | AED {opt_summary.get('estimated_annual_savings', 0):,.0f} Annual Savings</text>
+<text x="700" y="100" text-anchor="middle" fill="white" font-size="14" class="body-font" font-weight="300" opacity="0.8">🚀 Implementation ROI: {((opt_summary.get('estimated_annual_savings', 0) * 3 - opt_summary.get('estimated_implementation_cost', 0)) / max(opt_summary.get('estimated_implementation_cost', 1), 1) * 100):.1f}% over 3 years</text>
+
+<!-- Metrics Dashboard -->
+<rect x="50" y="150" width="1300" height="80" fill="white" stroke="#e2e8f0" stroke-width="1" rx="16" filter="url(#shadow)"/>
+
+<!-- Metric Cards -->
+<g transform="translate(100, 170)">
+    <rect width="220" height="40" fill="url(#successGradient)" rx="20" filter="url(#glow)"/>
+    <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">Steps: {len(current_steps)} → {len(optimized_steps)}</text>
+    <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">({len(eliminated_steps)} eliminated)</text>
+</g>
+
+<g transform="translate(350, 170)">
+    <rect width="220" height="40" fill="#4a90e2" rx="20" filter="url(#glow)"/>
+    <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">Time: {opt_summary.get('total_time_before', 0):.0f}h → {opt_summary.get('total_time_after', 0):.0f}h</text>
+    <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">({opt_summary.get('time_saved_percentage', 0):.1f}% faster)</text>
+</g>
+
+<g transform="translate(600, 170)">
+    <rect width="220" height="40" fill="#f59e0b" rx="20" filter="url(#glow)"/>
+    <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">Savings: AED {opt_summary.get('estimated_annual_savings', 0)/1000:.0f}K</text>
+    <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">Annual Value</text>
+</g>
+
+<g transform="translate(850, 170)">
+    <rect width="220" height="40" fill="#ef4444" rx="20" filter="url(#glow)"/>
+    <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">Payback: {opt_summary.get('payback_months', 0):.1f} months</text>
+    <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">Break-even point</text>
+</g>
+
+<g transform="translate(1100, 170)">
+    <rect width="220" height="40" fill="#8b5cf6" rx="20" filter="url(#glow)"/>
+    <text x="110" y="18" text-anchor="middle" fill="white" font-size="14" class="metric-font" font-weight="600">AI Ops: {opt_summary.get('automation_opportunities', 0)}</text>
+    <text x="110" y="32" text-anchor="middle" fill="white" font-size="10" class="body-font" font-weight="400" opacity="0.9">Automation Opportunities</text>
+</g>
+
+<!-- Process Comparison Section -->
+<text x="700" y="280" text-anchor="middle" fill="#1e293b" font-size="22" class="title-font" font-weight="500" letter-spacing="0.5px">🔄 AI-Powered Process Transformation</text>
+
+<!-- Before Process -->
+<rect x="70" y="300" width="600" height="450" fill="#fef2f2" stroke="#ef4444" stroke-width="2" rx="20" filter="url(#shadow)"/>
+<rect x="80" y="310" width="580" height="40" fill="#dc2626" rx="12"/>
+<text x="90" y="335" fill="white" font-size="16" class="title-font" font-weight="500">❌ BEFORE: Current Process ({len(current_steps)} steps - {opt_summary.get('total_time_before', 0):.0f}h)</text>
+
+<!-- Current Process Steps -->
+{SVGGenerator._generate_current_steps_svg(current_steps, eliminated_steps, 90, 365)}
+
+<!-- After Process -->
+<rect x="730" y="300" width="600" height="450" fill="#f0fdf4" stroke="#22c55e" stroke-width="2" rx="20" filter="url(#shadow)"/>
+<rect x="740" y="310" width="580" height="40" fill="#16a34a" rx="12"/>
+<text x="750" y="335" fill="white" font-size="16" class="title-font" font-weight="500">✅ AFTER: Optimized Process ({len(optimized_steps)} steps - {opt_summary.get('total_time_after', 0):.0f}h)</text>
+
+<!-- Optimized Process Steps -->
+{SVGGenerator._generate_optimized_steps_svg(optimized_steps, 750, 365)}
+
+<!-- Transformation Arrow -->
+<g transform="translate(670, 525)">
+    <circle cx="0" cy="0" r="30" fill="#f59e0b" filter="url(#shadow)"/>
+    <text x="0" y="8" text-anchor="middle" fill="white" font-size="24" class="title-font" font-weight="300">→</text>
+</g>
+
+<!-- Benefits Summary -->
+<rect x="70" y="800" width="1260" height="100" fill="white" stroke="#e2e8f0" stroke-width="1" rx="16" filter="url(#shadow)"/>
+<text x="700" y="830" text-anchor="middle" fill="#1e293b" font-size="20" class="title-font" font-weight="500" letter-spacing="0.5px">💎 Key Benefits</text>
+
+<!-- Benefit items -->
+<text x="90" y="860" fill="#475569" font-size="14" class="body-font" font-weight="400">• {opt_summary.get('time_saved_percentage', 0):.1f}% faster processing</text>
+<text x="90" y="880" fill="#475569" font-size="14" class="body-font" font-weight="400">• AED {opt_summary.get('estimated_annual_savings', 0):,.0f} annual savings</text>
+
+<text x="450" y="860" fill="#475569" font-size="14" class="body-font" font-weight="400">• {len(eliminated_steps)} steps eliminated</text>
+<text x="450" y="880" fill="#475569" font-size="14" class="body-font" font-weight="400">• {opt_summary.get('automation_opportunities', 0)} automation opportunities</text>
+
+<text x="800" y="860" fill="#475569" font-size="14" class="body-font" font-weight="400">• ROI payback in {opt_summary.get('payback_months', 0):.1f} months</text>
+<text x="800" y="880" fill="#475569" font-size="14" class="body-font" font-weight="400">• Reduced errors and improved quality</text>
+
+<!-- Footer -->
+<rect x="0" y="1040" width="1400" height="60" fill="#1e293b"/>
+<text x="700" y="1065" text-anchor="middle" fill="white" font-size="16" class="title-font" font-weight="400" letter-spacing="0.5px">AI Business Process Optimizer - Powered by Claude Sonnet 4</text>
+<text x="700" y="1085" text-anchor="middle" fill="white" font-size="12" class="body-font" font-weight="300" opacity="0.8">Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Transform your business processes with AI</text>
+
+</svg>'''
 
     @staticmethod
     def _generate_current_steps_svg(steps, eliminated_steps, start_x, start_y):
@@ -912,28 +1078,6 @@ class SVGGenerator:
             '''
         
         return svg_content
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-
 
 # ==================== UI COMPONENTS ====================
 
@@ -943,30 +1087,12 @@ class UIComponents:
     @staticmethod
     def render_header_with_status():
         """Render application header with API status"""
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            st.markdown("""
-            <div class="main-header">
-                <h1>🤖 AI-Powered Business Process Optimizer</h1>
-                <p>Upload 1-5 process documents for intelligent optimization analysis powered by Claude Sonnet 4</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            UIComponents._check_api_status()
-    
-    @staticmethod
-    def _check_api_status():
-        """Check and display API connection status"""
-        try:
-            ClaudeAPIManager()
-            st.success("✅ Claude Sonnet 4 Connected")
-            st.caption("AI-powered analysis enabled")
-        except Exception as e:
-            st.error("❌ Claude API Error")
-            st.caption("Check .env file for ANTHROPIC_API_KEY")
-            st.stop()
+        st.markdown("""
+        <div class="main-header">
+            <h1>AI-Powered Business Process Optimizer</h1>
+            <p>Upload 1-5 process documents for intelligent optimization analysis powered by Claude Sonnet 4</p>
+        </div>
+        """, unsafe_allow_html=True)
     
     @staticmethod
     def render_sidebar_config():
@@ -1033,9 +1159,6 @@ class UIComponents:
         
         if st.session_state.analysis_results:
             UIComponents._render_portfolio_download()
-    
-    
-    
     
     @staticmethod
     def _render_portfolio_download():
@@ -1123,17 +1246,6 @@ class UIComponents:
                 except Exception as e:
                     st.error(f"❌ Error generating portfolio report: {str(e)}")
                     st.info("💡 Please ensure all analyses completed successfully before generating portfolio report.")
-                    
-                    # Debug information
-                    if st.checkbox("Show debug info"):
-                        st.write("Analysis results structure:")
-                        for i, result in enumerate(st.session_state.analysis_results):
-                            st.write(f"Result {i+1} keys:", list(result.keys()) if result else "None")
-                            if result and 'analysis_result' in result:
-                                st.write(f"  - analysis_result keys:", list(result['analysis_result'].keys()))
-                            
-                            
-                            
 
 class FileHandler:
     """Handle file upload and validation"""
@@ -1197,7 +1309,6 @@ class FileHandler:
     def _display_analysis_summary():
         """Display analysis configuration summary"""
         st.markdown("**Analysis Configuration:**")
-        # Note: In a real implementation, you'd pass config from sidebar
         st.write("🎯 Analysis Depth: Comprehensive")
         st.write("💰 Cost/Hour: AED 50")
         st.write("🔄 Annual Cycles: 50")
@@ -1264,6 +1375,18 @@ class AnalysisOrchestrator:
     @staticmethod
     def run_analysis(uploaded_files):
         """Run analysis with progress tracking"""
+        # Check if API key is provided
+        if not st.session_state.get('api_key'):
+            st.error("❌ Please provide your Claude API key above before starting analysis")
+            return
+        
+        if not st.session_state.get('claude_enabled'):
+            st.warning("⚠️ API connection not verified. Please test your connection first.")
+            if st.button("🔍 Test Connection Again", type="secondary"):
+                APIKeyManager._test_api_connection()
+                st.rerun()
+            return
+        
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             if st.button("🚀 Start AI Analysis", type="primary", use_container_width=True):
@@ -1278,7 +1401,12 @@ class AnalysisOrchestrator:
         status_text = st.empty()
         
         try:
-            optimizer = ProcessOptimizer()
+            optimizer = ProcessOptimizer(st.session_state.api_key)
+            
+            if not optimizer.is_ready():
+                st.error("❌ Process optimizer not ready. Please check your API key.")
+                return
+            
             planner = ImplementationPlanner(optimizer.api_manager)
             doc_generator = ReportGenerator(planner)
             
@@ -1294,7 +1422,7 @@ class AnalysisOrchestrator:
             
         except Exception as e:
             st.error(f"❌ Analysis failed: {str(e)}")
-            st.info("💡 Tip: Ensure your .env file contains a valid ANTHROPIC_API_KEY")
+            st.info("💡 Tip: Check your API key and internet connection")
     
     @staticmethod
     def _process_single_file(file, index, total_files, progress_bar, status_text, optimizer, doc_generator):
@@ -1303,22 +1431,27 @@ class AnalysisOrchestrator:
         progress_bar.progress(progress)
         status_text.text(f"Analyzing {file.name} ... ({index+1}/{total_files})")
         
-        # Analyze document
-        analysis_result = optimizer.analyze_document(file)
-        
-        # Generate reports
-        status_text.text(f"Generating reports for {file.name}...")
-        comprehensive_report = doc_generator.generate_comprehensive_report(analysis_result)
-        advanced_svg = SVGGenerator.generate_advanced_svg_workflow(analysis_result)
-        
-        # Store results
-        st.session_state.analysis_results.append({
-            'analysis_result': analysis_result,
-            'comprehensive_report': comprehensive_report,
-            'advanced_svg': advanced_svg,
-            'filename': file.name,
-            'timestamp': datetime.now().isoformat()
-        })
+        try:
+            # Analyze document
+            analysis_result = optimizer.analyze_document(file)
+            
+            # Generate reports
+            status_text.text(f"Generating reports for {file.name}...")
+            comprehensive_report = doc_generator.generate_comprehensive_report(analysis_result)
+            advanced_svg = SVGGenerator.generate_advanced_svg_workflow(analysis_result)
+            
+            # Store results
+            st.session_state.analysis_results.append({
+                'analysis_result': analysis_result,
+                'comprehensive_report': comprehensive_report,
+                'advanced_svg': advanced_svg,
+                'filename': file.name,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+        except Exception as e:
+            st.error(f"❌ Error processing {file.name}: {str(e)}")
+            # Continue with other files
     
     @staticmethod
     def _complete_analysis(progress_bar, status_text, total_files):
@@ -1629,12 +1762,6 @@ class ProcessStepRenderer:
                 <small style="color: #666;">💡 {optimization_rationale}</small>
             </div>
             """, unsafe_allow_html=True)
-            
-            
-            
-            
-            
-            
 
 class OptimizationSummaryRenderer:
     """Render optimization summary with charts"""
@@ -1683,7 +1810,6 @@ class OptimizationSummaryRenderer:
             plt.xticks(rotation=45)
             plt.tight_layout()
             
-            # Use st.pyplot without the key parameter
             st.pyplot(fig)
             plt.close()
         else:
@@ -1731,7 +1857,19 @@ def main():
     
     # Render UI components
     UIComponents.render_header_with_status()
+    
+    # API Key Management Section
+    st.header("🔑 API Configuration")
+    has_api_key = APIKeyManager.render_api_key_section()
+    
+    if not has_api_key:
+        st.info("👆 Please enter your Claude API key above to continue")
+        st.stop()
+    
+    # Sidebar configuration
     config = UIComponents.render_sidebar_config()
+    
+    st.divider()
     
     # Main content area
     st.header("📁 Document Upload & Analysis")
@@ -1783,338 +1921,6 @@ class ErrorHandler:
             st.error(f"❌ {context} failed: {error_msg}")
         
         st.info("💡 If the problem persists, please check your internet connection and API key.")
-    
-    @staticmethod
-    def handle_file_error(error: Exception, filename: str):
-        """Handle file processing errors"""
-        st.error(f"❌ Error processing {filename}: {str(error)}")
-        st.info("💡 Please ensure the file is not corrupted and is in a supported format.")
-    
-    @staticmethod
-    def handle_json_error(error: Exception, context: str = "JSON parsing"):
-        """Handle JSON parsing errors"""
-        st.error(f"❌ {context} failed: Invalid response format")
-        st.info("💡 The AI response was not in the expected format. Please try again.")
-
-class ValidationUtils:
-    """Utility functions for data validation"""
-    
-    @staticmethod
-    def validate_process_data(process_data: Dict) -> bool:
-        """Validate process data structure"""
-        required_fields = ['process_name', 'process_description', 'steps']
-        
-        for field in required_fields:
-            if field not in process_data:
-                st.warning(f"Missing required field: {field}")
-                return False
-        
-        if not isinstance(process_data['steps'], list) or len(process_data['steps']) == 0:
-            st.warning("Process must have at least one step")
-            return False
-        
-        return True
-    
-    @staticmethod
-    def validate_optimization_data(optimization_data: Dict) -> bool:
-        """Validate optimization data structure"""
-        required_fields = ['optimized_steps', 'optimization_summary']
-        
-        for field in required_fields:
-            if field not in optimization_data:
-                st.warning(f"Missing required optimization field: {field}")
-                return False
-        
-        return True
-    
-    @staticmethod
-    def sanitize_filename(filename: str) -> str:
-        """Sanitize filename for safe usage"""
-        import re
-        # Remove special characters and replace with underscores
-        sanitized = re.sub(r'[^\w\-_\.]', '_', filename)
-        # Remove multiple consecutive underscores
-        sanitized = re.sub(r'_+', '_', sanitized)
-        return sanitized
-
-class CacheManager:
-    """Manage Streamlit caching for better performance"""
-    
-    @staticmethod
-    @st.cache_data(ttl=3600)  # Cache for 1 hour
-    def cache_analysis_result(file_content: str, filename: str) -> Dict:
-        """Cache analysis results to avoid re-processing same files"""
-        # This would be implemented with actual caching logic
-        # For now, it's a placeholder for the caching mechanism
-        return {}
-    
-    @staticmethod
-    def clear_cache():
-        """Clear all cached data"""
-        st.cache_data.clear()
-        st.success("Cache cleared successfully!")
-
-class ConfigManager:
-    """Manage application configuration"""
-    
-    @staticmethod
-    def load_config() -> Dict:
-        """Load application configuration"""
-        default_config = {
-            'max_files': 5,
-            'supported_formats': ['pdf', 'txt', 'docx'],
-            'max_file_size_mb': 10,
-            'default_cost_per_hour': 50.0,
-            'default_annual_cycles': 50,
-            'default_implementation_budget': 50000.0
-        }
-        
-        # In a real application, this could load from a config file
-        return default_config
-    
-    @staticmethod
-    def validate_config(config: Dict) -> bool:
-        """Validate configuration parameters"""
-        required_keys = ['max_files', 'supported_formats']
-        return all(key in config for key in required_keys)
-
-# ==================== PERFORMANCE MONITORING ====================
-
-class PerformanceMonitor:
-    """Monitor application performance and usage"""
-    
-    def __init__(self):
-        self.start_time = time.time()
-        self.metrics = {}
-    
-    def start_timer(self, operation: str):
-        """Start timing an operation"""
-        self.metrics[operation] = time.time()
-    
-    def end_timer(self, operation: str) -> float:
-        """End timing an operation and return duration"""
-        if operation in self.metrics:
-            duration = time.time() - self.metrics[operation]
-            return duration
-        return 0.0
-    
-    def log_performance(self, operation: str, duration: float):
-        """Log performance metrics"""
-        if duration > 30:  # Log slow operations (>30 seconds)
-            st.info(f"⚠️ {operation} took {duration:.1f} seconds")
-
-# ==================== EXPORT UTILITIES ====================
-
-class ExportManager:
-    """Handle various export formats and data preparation"""
-    
-    @staticmethod
-    def prepare_excel_export(analysis_results: List[Dict]) -> bytes:
-        """Prepare Excel export (placeholder for future implementation)"""
-        # This would create an Excel file with multiple sheets
-        # containing analysis results, charts, and summaries
-        pass
-    
-    @staticmethod
-    def prepare_powerpoint_export(analysis_results: List[Dict]) -> bytes:
-        """Prepare PowerPoint export (placeholder for future implementation)"""
-        # This would create a presentation with analysis results
-        # and visualizations suitable for executive presentations
-        pass
-    
-    @staticmethod
-    def create_zip_package(analysis_results: List[Dict]) -> bytes:
-        """Create a ZIP package with all analysis outputs"""
-        import zipfile
-        import io
-        
-        zip_buffer = io.BytesIO()
-        
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for i, result in enumerate(analysis_results):
-                process_name = result['analysis_result']['process_data']['process_name']
-                safe_name = ValidationUtils.sanitize_filename(process_name)
-                
-                # Add comprehensive report
-                zip_file.writestr(
-                    f"{i+1:02d}_{safe_name}_Report.md",
-                    result['comprehensive_report'].encode('utf-8')
-                )
-                
-                # Add SVG workflow
-                zip_file.writestr(
-                    f"{i+1:02d}_{safe_name}_Workflow.svg",
-                    result['advanced_svg'].encode('utf-8')
-                )
-                
-                # Add JSON data
-                export_data = {
-                    'process_analysis': result['analysis_result']['process_data'],
-                    'optimization_results': result['analysis_result']['optimization_data'],
-                    'metadata': {
-                        'filename': result['filename'],
-                        'analysis_timestamp': result['timestamp'],
-                        'ai_powered': True
-                    }
-                }
-                
-                zip_file.writestr(
-                    f"{i+1:02d}_{safe_name}_Data.json",
-                    json.dumps(export_data, indent=2).encode('utf-8')
-                )
-        
-        zip_buffer.seek(0)
-        return zip_buffer.getvalue()
-
-# ==================== ANALYTICS & INSIGHTS ====================
-
-class AnalyticsEngine:
-    """Advanced analytics and insights generation"""
-    
-    @staticmethod
-    def calculate_process_complexity_score(process_data: Dict) -> float:
-        """Calculate a complexity score for the process"""
-        steps = process_data.get('steps', [])
-        
-        complexity_factors = {
-            'HIGH': 3,
-            'MEDIUM': 2,
-            'LOW': 1
-        }
-        
-        total_complexity = sum(
-            complexity_factors.get(step.get('complexity', 'MEDIUM'), 2) 
-            for step in steps
-        )
-        
-        # Normalize by number of steps
-        if len(steps) > 0:
-            return total_complexity / len(steps)
-        return 0.0
-    
-    @staticmethod
-    def identify_automation_candidates(process_data: Dict) -> List[Dict]:
-        """Identify steps that are good candidates for automation"""
-        steps = process_data.get('steps', [])
-        
-        automation_candidates = []
-        for step in steps:
-            automation_potential = step.get('automation_potential', 'LOW')
-            complexity = step.get('complexity', 'HIGH')
-            duration = step.get('duration_hours', 0)
-            
-            # High automation potential, low complexity, and significant duration
-            if automation_potential == 'HIGH' and complexity == 'LOW' and duration >= 4:
-                automation_candidates.append({
-                    'step': step,
-                    'priority': 'HIGH',
-                    'reasoning': 'High automation potential with low complexity'
-                })
-            elif automation_potential == 'HIGH' and duration >= 8:
-                automation_candidates.append({
-                    'step': step,
-                    'priority': 'MEDIUM',
-                    'reasoning': 'High automation potential with significant time impact'
-                })
-        
-        return automation_candidates
-    
-    @staticmethod
-    def calculate_roi_projection(optimization_data: Dict, years: int = 5) -> Dict:
-        """Calculate multi-year ROI projection"""
-        opt_summary = optimization_data.get('optimization_summary', {})
-        
-        annual_savings = opt_summary.get('estimated_annual_savings', 0)
-        implementation_cost = opt_summary.get('estimated_implementation_cost', 0)
-        
-        projection = {
-            'years': [],
-            'cumulative_savings': [],
-            'cumulative_roi': [],
-            'break_even_year': None
-        }
-        
-        cumulative_savings = 0
-        for year in range(1, years + 1):
-            cumulative_savings += annual_savings
-            net_benefit = cumulative_savings - implementation_cost
-            roi = (net_benefit / implementation_cost * 100) if implementation_cost > 0 else 0
-            
-            projection['years'].append(year)
-            projection['cumulative_savings'].append(cumulative_savings)
-            projection['cumulative_roi'].append(roi)
-            
-            if net_benefit >= 0 and projection['break_even_year'] is None:
-                projection['break_even_year'] = year
-        
-        return projection
-
-# ==================== INTEGRATION HELPERS ====================
-
-class IntegrationManager:
-    """Manage integrations with external systems"""
-    
-    @staticmethod
-    def export_to_project_management(analysis_results: List[Dict], platform: str = "generic"):
-        """Export implementation tasks to project management tools"""
-        # This would integrate with tools like Asana, Jira, Monday.com, etc.
-        # For now, it's a placeholder that generates a structured task list
-        
-        tasks = []
-        for result in analysis_results:
-            process_name = result['analysis_result']['process_data']['process_name']
-            opt_summary = result['analysis_result']['optimization_data']['optimization_summary']
-            
-            phases = opt_summary.get('implementation_phases', [])
-            for phase in phases:
-                tasks.append({
-                    'project': f"Process Optimization: {process_name}",
-                    'phase': phase.get('phase', 'Unknown Phase'),
-                    'duration_months': phase.get('duration_months', 1),
-                    'activities': phase.get('activities', []),
-                    'cost': phase.get('cost', 0)
-                })
-        
-        return tasks
-    
-    @staticmethod
-    def generate_change_management_plan(analysis_results: List[Dict]) -> str:
-        """Generate a comprehensive change management plan"""
-        # This would create a detailed change management strategy
-        # including stakeholder analysis, communication plan, training requirements, etc.
-        
-        total_processes = len(analysis_results)
-        total_affected_employees = total_processes * 10  # Rough estimate
-        
-        plan = f"""
-# Change Management Plan - Process Optimization Initiative
-
-## Executive Summary
-This change management plan supports the implementation of AI-optimized processes across {total_processes} business processes, potentially affecting {total_affected_employees} employees.
-
-## Stakeholder Analysis
-- **Primary Stakeholders**: Process owners, end users, IT department
-- **Secondary Stakeholders**: Management, external vendors
-- **Change Champions**: To be identified from each affected department
-
-## Communication Strategy
-1. **Announcement Phase**: Executive communication to all staff
-2. **Education Phase**: Detailed workshops and training sessions
-3. **Implementation Phase**: Regular updates and support
-4. **Adoption Phase**: Feedback collection and continuous improvement
-
-## Training Requirements
-- Process-specific training for end users
-- Technical training for IT support staff
-- Change leadership training for managers
-
-## Success Metrics
-- Process adoption rate: Target 95% within 6 months
-- User satisfaction: Target 4.5/5 rating
-- Performance improvement: Target metrics per process
-"""
-        
-        return plan
 
 # ==================== ENTRY POINT ====================
 
